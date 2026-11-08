@@ -4,43 +4,55 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#include <netinet/ip.h>
+#include <linux/if_packet.h>
 #include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <netinet/ip_icmp.h>
 
 int main() {
-    int sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if (sock < 0) {
-        perror("Socket Error (Did you run with sudo?)");
-        return 1;
-    }
+    int sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (sockfd < 0) { perror("Socket"); return 1; }
 
-    unsigned char buffer[65536];
-    printf("C Packet Sniffer started...\n");
+    unsigned char *buffer = malloc(65536);
+    printf("C Packet Sniffer running (Press Ctrl+C to stop)...\n");
 
     while (1) {
-        int data_size = recvfrom(sock, buffer, sizeof(buffer), 0, NULL, NULL);
-        if (data_size < 0) continue;
+        int data_size = recvfrom(sockfd, buffer, 65536, 0, NULL, NULL);
+        if (data_size < 0) break;
 
-        struct ether_header *eth = (struct ether_header *)buffer;
-        printf("\n[Ethernet] Proto: %#06x\n", ntohs(eth->ether_type));
+        struct ethhdr *eth = (struct ethhdr *)buffer;
+        unsigned short proto = ntohs(eth->h_proto);
+        
+        printf("\n[Eth] Src: %02X:%02X:%02X:%02X:%02X:%02X -> Dst: %02X:%02X:%02X:%02X:%02X:%02X | Proto: 0x%04X",
+               eth->h_source[0], eth->h_source[1], eth->h_source[2], eth->h_source[3], eth->h_source[4], eth->h_source[5],
+               eth->h_dest[0], eth->h_dest[1], eth->h_dest[2], eth->h_dest[3], eth->h_dest[4], eth->h_dest[5], proto);
 
-        // Check if IPv4 (0x0800)
-        if (ntohs(eth->ether_type) == 0x0800) {
-            struct iphdr *ip = (struct iphdr *)(buffer + sizeof(struct ether_header));
+        if (proto == ETH_P_IP) {
+            struct iphdr *iph = (struct iphdr *)(buffer + sizeof(struct ethhdr));
+            struct in_addr src = {iph->saddr}, dst = {iph->daddr};
             
-            struct sockaddr_in src, dest;
-            memset(&src, 0, sizeof(src));
-            memset(&dest, 0, sizeof(dest));
-            src.sin_addr.s_addr = ip->saddr;
-            dest.sin_addr.s_addr = ip->daddr;
+            printf("\n  [IP] %s -> %s | TTL: %d | Proto: %d", 
+                   inet_ntoa(src), inet_ntoa(dst), iph->ttl, iph->protocol);
 
-            printf("  [IPv4] %s -> %s | Protocol: %d | TTL: %d\n", 
-                   inet_ntoa(src.sin_addr), 
-                   inet_ntoa(dest.sin_addr), 
-                   ip->protocol, 
-                   ip->ttl);
+            unsigned char *transport = buffer + sizeof(struct ethhdr) + (iph->ihl * 4);
+
+            if (iph->protocol == IPPROTO_TCP) {
+                struct tcphdr *tcp = (struct tcphdr *)transport;
+                printf("\n    [TCP] Port %u -> %u", ntohs(tcp->source), ntohs(tcp->dest));
+            } 
+            else if (iph->protocol == IPPROTO_UDP) {
+                struct udphdr *udp = (struct udphdr *)transport;
+                printf("\n    [UDP] Port %u -> %u", ntohs(udp->source), ntohs(udp->dest));
+            } 
+            else if (iph->protocol == IPPROTO_ICMP) {
+                struct icmphdr *icmp = (struct icmphdr *)transport;
+                printf("\n    [ICMP] Type: %d | Code: %d", icmp->type, icmp->code);
+            }
         }
     }
-    close(sock);
+    close(sockfd);
+    free(buffer);
     return 0;
 }
